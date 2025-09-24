@@ -5,7 +5,7 @@ import { google } from 'googleapis';
 const app = express();
 app.use(express.json());
 
-const VERSION = 'r5-debug';
+const VERSION = 'r6-projectid';
 
 // --- Google Sheets setup ---
 const sheetsAuth = new google.auth.GoogleAuth({
@@ -22,7 +22,7 @@ function verifyTelegramPayload(initData) {
   if (process.env.TELEGRAM_VERIFY_OFF === '1') {
     return { ok: true };
   }
-  // TODO: proper signature check if re-enabled
+  // TODO: real signature check if you re-enable later
   return { ok: false, error: 'Verification disabled but required' };
 }
 
@@ -31,62 +31,43 @@ async function tildaFetch(path, paramsObj) {
   const body = new URLSearchParams(paramsObj);
   const hosts = ['https://api.tilda.cc', 'https://api.tildacdn.info'];
   let lastErr;
-
   for (const host of hosts) {
     try {
       const ctl = new AbortController();
-      const id = setTimeout(() => ctl.abort(), 10000); // 10s timeout
+      const id = setTimeout(() => ctl.abort(), 10000);
       const res = await fetch(`${host}${path}`, { method: 'POST', body, signal: ctl.signal });
       clearTimeout(id);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json().catch(() => ({}));
       return json;
-    } catch (e) {
-      lastErr = e;
-    }
+    } catch (e) { lastErr = e; }
   }
   throw new Error(`Tilda request failed: ${String(lastErr)}`);
 }
 
-async function tildaGetOrders() {
-  const json = await tildaFetch('/v2/shop/orders/list', {
+function tildaCreds(extra = {}) {
+  return {
     publickey: process.env.TILDA_PUBLIC_KEY || '',
     secretkey: process.env.TILDA_SECRET_KEY || '',
-  });
-  return json?.result?.orders || [];
-}
-
-async function tildaGetProduct(productId) {
-  const json = await tildaFetch('/v2/shop/product/get', {
-    publickey: process.env.TILDA_PUBLIC_KEY || '',
-    secretkey: process.env.TILDA_SECRET_KEY || '',
-    productid: String(productId),
-  });
-  return json?.result || null;
+    projectid: process.env.TILDA_PROJECT_ID || '',
+    ...extra,
+  };
 }
 
 async function tildaListProducts() {
-  const json = await tildaFetch('/v2/shop/products/list', {
-    publickey: process.env.TILDA_PUBLIC_KEY || '',
-    secretkey: process.env.TILDA_SECRET_KEY || '',
-  });
+  const json = await tildaFetch('/v2/shop/products/list', tildaCreds());
   return json?.result?.products || [];
 }
 
-// Debug: list product IDs we can access with these keys
-app.get('/debug/products', async (_req, res) => {
-  try {
-    const list = await tildaListProducts();
-    // return compact info
-    res.json(list.map(p => ({
-      id: p.id, title: p.title, url: p.url
-    })));
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
+async function tildaGetProduct(productId) {
+  const json = await tildaFetch('/v2/shop/product/get', tildaCreds({ productid: String(productId) }));
+  return json?.result || null;
+}
 
-
+async function tildaGetOrders() {
+  const json = await tildaFetch('/v2/shop/orders/list', tildaCreds());
+  return json?.result?.orders || [];
+}
 
 // --- Sheets helpers ---
 async function getProductOwnersBySellerUsername(username) {
@@ -107,7 +88,6 @@ app.post('/api/me', async (req, res) => {
   if (!verify.ok) return res.status(403).json({ error: verify.error });
 
   const user = initDataUnsafe?.user || {};
-  // Save/update user in Users sheet
   const now = new Date().toISOString();
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
@@ -124,7 +104,7 @@ app.post('/api/me', async (req, res) => {
 });
 
 app.post('/api/me/orders', async (req, res) => {
-  const { initData, initDataUnsafe } = req.body;
+  const { initData } = req.body;
   const verify = verifyTelegramPayload(initData);
   if (!verify.ok) return res.status(403).json({ error: verify.error });
 
@@ -178,6 +158,18 @@ app.get('/debug/tildaProduct', async (req, res) => {
   }
 });
 
+app.get('/debug/products', async (_req, res) => {
+  try {
+    const list = await tildaListProducts();
+    res.json(list.map(p => ({
+      id: p.id, title: p.title, url: p.url
+    })));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // --- Start ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Backend running on ' + PORT));
+
