@@ -96,11 +96,15 @@ async function getProductOwnersBySellerUsername(username) {
     range: 'ProductOwners!A2:D',
   });
   const rows = r.data.values || [];
-  const want = (username?.startsWith('@') ? username : '@' + username).toLowerCase();
-  return rows
-    .filter((x) => ((x[2] || '').toLowerCase() === want))
-    .map((x) => ({ SKU: x[0], TildaProductId: x[1] }));
+  const raw = username?.toLowerCase() || '';
+  const want1 = raw.startsWith('@') ? raw : '@' + raw;
+  const want2 = raw.startsWith('@') ? raw.slice(1) : raw;
+  return rows.filter((x) => {
+    const cell = (x[2] || '').toLowerCase();
+    return cell === want1 || cell === want2;
+  }).map((x) => ({ SKU: x[0], TildaProductId: x[1] }));
 }
+
 
 // --- Tilda (read-only) ---
 async function tildaGetOrders() {
