@@ -1,4 +1,7 @@
 // 12-30 Mini App Backend (read-only MVP, with debug + Tilda fallback)
+// (top of server.js)
+const VERSION = 'r5-debug';
+
 import express from 'express';
 import crypto from 'crypto';
 import fetch from 'node-fetch';
