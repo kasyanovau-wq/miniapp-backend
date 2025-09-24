@@ -1,4 +1,4 @@
-// 12-30 Mini App Backend (read-only MVP)
+// 12-30 Mini App Backend (read-only MVP, with debug + Tilda fallback)
 import express from 'express';
 import crypto from 'crypto';
 import fetch from 'node-fetch';
@@ -9,9 +9,9 @@ dotenv.config();
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// --- CORS (tighten to your Vercel domain later) ---
+// CORS (relax now, tighten later)
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // set to your *.vercel.app later
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -27,9 +27,9 @@ const {
   PORT = 3000,
 } = process.env;
 
-// --- Telegram WebApp verify (toggle with TELEGRAM_VERIFY_OFF=1) ---
+// ---- Telegram verify (bypass with TELEGRAM_VERIFY_OFF=1) ----
 function verifyTelegram(initData) {
-  if (TELEGRAM_VERIFY_OFF === '1') return; // TEMP bypass
+  if (TELEGRAM_VERIFY_OFF === '1') return; // TEMP bypass while debugging
 
   const url = new URLSearchParams(initData || '');
   const hash = url.get('hash');
@@ -37,13 +37,10 @@ function verifyTelegram(initData) {
 
   const dataCheckString = Array.from(url.keys())
     .sort()
-    .map((k) => `${k}=${url.get(k)}`)
+    .map(k => `${k}=${url.get(k)}`)
     .join('\n');
 
-  if (!BOT_TOKEN) {
-    console.error('[verify] missing BOT_TOKEN');
-    throw new Error('Server misconfigured: no BOT_TOKEN');
-  }
+  if (!BOT_TOKEN) throw new Error('Server misconfigured: no BOT_TOKEN');
   const secret = crypto.createHash('sha256').update(BOT_TOKEN).digest();
   const computed = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
@@ -61,23 +58,20 @@ function verifyTelegram(initData) {
   if (!authDate || Date.now() / 1000 - authDate > 24 * 3600) throw new Error('Auth expired');
 }
 
-// --- Google Sheets helpers ---
+// ---- Google Sheets helpers ----
 function getGoogleAuth() {
   const raw = Buffer.from(GOOGLE_SA_BASE64 || '', 'base64').toString('utf8');
   const json = JSON.parse(raw);
-  return new google.auth.JWT(
-    json.client_email,
-    undefined,
-    json.private_key,
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
+  return new google.auth.JWT(json.client_email, undefined, json.private_key, [
+    'https://www.googleapis.com/auth/spreadsheets',
+  ]);
 }
 
 async function appendUserRow({ id, username, first_name, last_name }) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: 'v4', auth });
   const now = new Date().toISOString();
-  return sheets.spreadsheets.values.append({
+  await sheets.spreadsheets.values.append({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: 'Users!A1',
     valueInputOption: 'USER_ENTERED',
@@ -87,7 +81,7 @@ async function appendUserRow({ id, username, first_name, last_name }) {
   });
 }
 
-// SellerUsername mapping (column C)
+// Accept both "@name" and "name" in column C (SellerUsername)
 async function getProductOwnersBySellerUsername(username) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: 'v4', auth });
@@ -96,39 +90,58 @@ async function getProductOwnersBySellerUsername(username) {
     range: 'ProductOwners!A2:D',
   });
   const rows = r.data.values || [];
-  const raw = username?.toLowerCase() || '';
-  const want1 = raw.startsWith('@') ? raw : '@' + raw;
-  const want2 = raw.startsWith('@') ? raw.slice(1) : raw;
-  return rows.filter((x) => {
-    const cell = (x[2] || '').toLowerCase();
-    return cell === want1 || cell === want2;
-  }).map((x) => ({ SKU: x[0], TildaProductId: x[1] }));
+  const raw = (username || '').trim().toLowerCase();
+  const wantAt = raw.startsWith('@') ? raw : '@' + raw;
+  const wantNo = raw.startsWith('@') ? raw.slice(1) : raw;
+
+  return rows
+    .filter(x => {
+      const cell = ((x[2] || '').trim().toLowerCase());
+      return cell === wantAt || cell === wantNo;
+    })
+    .map(x => ({ SKU: x[0], TildaProductId: x[1] }));
 }
 
+// ---- Tilda (robust fetch with fallback host + timeout) ----
+async function tildaFetch(path, paramsObj) {
+  const body = new URLSearchParams(paramsObj);
+  const hosts = ['https://api.tilda.cc', 'https://api.tildacdn.info'];
+  let lastErr;
+  for (const host of hosts) {
+    try {
+      const ctl = new AbortController();
+      const id = setTimeout(() => ctl.abort(), 10000);
+      const res = await fetch(`${host}${path}`, { method: 'POST', body, signal: ctl.signal });
+      clearTimeout(id);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json().catch(() => ({}));
+      return json;
+    } catch (e) {
+      lastErr = e;
+      // try next host
+    }
+  }
+  throw new Error(`Tilda request failed: ${String(lastErr)}`);
+}
 
-// --- Tilda (read-only) ---
 async function tildaGetOrders() {
-  const params = new URLSearchParams({
+  const json = await tildaFetch('/v2/shop/orders/list', {
     publickey: TILDA_PUBLIC_KEY || '',
     secretkey: TILDA_SECRET_KEY || '',
   });
-  const res = await fetch('https://api.tilda.cc/v2/shop/orders/list', { method: 'POST', body: params });
-  const json = await res.json().catch(() => ({}));
   return json?.result?.orders || [];
 }
 
 async function tildaGetProduct(productId) {
-  const params = new URLSearchParams({
+  const json = await tildaFetch('/v2/shop/product/get', {
     publickey: TILDA_PUBLIC_KEY || '',
     secretkey: TILDA_SECRET_KEY || '',
     productid: String(productId),
   });
-  const res = await fetch('https://api.tilda.cc/v2/shop/product/get', { method: 'POST', body: params });
-  const json = await res.json().catch(() => ({}));
   return json?.result || null;
 }
 
-// --- Routes ---
+// ---- Routes ----
 app.post('/api/me', async (req, res) => {
   try {
     const { initData, initDataUnsafe } = req.body || {};
@@ -150,7 +163,7 @@ app.post('/api/me/orders', async (req, res) => {
     if (!username) return res.json({ orders: [] });
 
     const orders = await tildaGetOrders();
-    const mine = (orders || []).filter((o) => {
+    const mine = (orders || []).filter(o => {
       const hay = [
         o.email,
         o.phone,
@@ -194,6 +207,27 @@ app.post('/api/me/sales', async (req, res) => {
     res.json({ products: out });
   } catch (e) {
     res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// ---- Debug routes (remove once green) ----
+app.get('/debug/owners', async (req, res) => {
+  try {
+    const u = (req.query.u || '').toString();
+    const links = await getProductOwnersBySellerUsername(u);
+    res.json({ username: u, links });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/debug/tildaProduct', async (req, res) => {
+  try {
+    const id = req.query.id;
+    const p = await tildaGetProduct(id);
+    res.json({ id, ok: !!p, product: p });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
   }
 });
 
