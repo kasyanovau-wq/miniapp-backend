@@ -65,6 +65,29 @@ async function tildaGetProduct(productId) {
   return json?.result || null;
 }
 
+async function tildaListProducts() {
+  const json = await tildaFetch('/v2/shop/products/list', {
+    publickey: process.env.TILDA_PUBLIC_KEY || '',
+    secretkey: process.env.TILDA_SECRET_KEY || '',
+  });
+  return json?.result?.products || [];
+}
+
+// Debug: list product IDs we can access with these keys
+app.get('/debug/products', async (_req, res) => {
+  try {
+    const list = await tildaListProducts();
+    // return compact info
+    res.json(list.map(p => ({
+      id: p.id, title: p.title, url: p.url
+    })));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+
+
 // --- Sheets helpers ---
 async function getProductOwnersBySellerUsername(username) {
   const res = await sheets.spreadsheets.values.get({
