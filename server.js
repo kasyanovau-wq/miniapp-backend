@@ -59,13 +59,21 @@ async function appendUserRow({ id, username, first_name, last_name }) {
   });
 }
 
-async function getProductOwnersBySeller(telegramId) {
+async function getProductOwnersBySellerUsername(username) {
   const auth = getGoogleAuth();
   const sheets = google.sheets({ version: 'v4', auth });
-  const r = await sheets.spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range: 'ProductOwners!A2:D' });
+  const r = await sheets.spreadsheets.values.get({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: 'ProductOwners!A2:D'
+  });
   const rows = r.data.values || [];
-  return rows.filter(x => x[2] === String(telegramId)).map(x => ({ SKU: x[0], TildaProductId: x[1] }));
+  const want = (username?.startsWith('@') ? username : '@' + username).toLowerCase();
+  return rows
+    .filter(x => ((x[2] || '').toLowerCase() === want))
+    .map(x => ({ SKU: x[0], TildaProductId: x[1] }));
 }
+
+
 
 // ---- Tilda (read-only) ----
 async function tildaGetOrders() {
@@ -119,15 +127,18 @@ app.post('/api/me/sales', async (req, res) => {
     const { initData, initDataUnsafe } = req.body || {};
     verifyTelegram(initData);
     const u = initDataUnsafe?.user || {};
-    const links = await getProductOwnersBySeller(u.id);
+    const links = await getProductOwnersBySellerUsername(u.username || '');
     const out = [];
     for (const link of links) {
       const p = await tildaGetProduct(link.TildaProductId);
-      if (p) out.push({ sku: link.SKU, tildaId: link.TildaProductId, title: p.title, price: p.price, images: p.images || [] });
+      if (p) out.push({
+        sku: link.SKU,
+        tildaId: link.TildaProductId,
+        title: p.title,
+        price: p.price,
+        images: p.images || []
+      });
     }
     res.json({ products: out });
   } catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
-
-app.get('/', (req, res) => res.send('12-30 backend OK'));
-app.listen(PORT, () => console.log('Backend on :' + PORT));
